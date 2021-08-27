@@ -1,6 +1,6 @@
 CC=g++
-CFLAGS=-std=c++11 -g -Wall -pthread -I./
-LDFLAGS= -lpthread -ltbb -lhiredis
+CFLAGS=-std=c++11 -g -Wall -pthread -I./ -L/home/jiel/nvm-middleware/cmake/build
+LDFLAGS= -lpthread -ltbb -lhiredis -lmiddleware -lpmemkv
 SUBDIRS=core db redis
 SUBSRCS=$(wildcard core/*.cc) $(wildcard db/*.cc)
 OBJECTS=$(SUBSRCS:.cc=.o)
