@@ -1,6 +1,6 @@
 CC=g++
-CFLAGS=-std=c++11 -g -Wall -pthread -I./ -L/home/jiel/nvm-middleware/cmake/build
-LDFLAGS= -lpthread -ltbb -lhiredis -lmiddleware -lpmemkv
+CFLAGS=-std=c++11 -g -Wall -pthread -I./ -I/home/jiel/HdrHistogram_c/src -I/usr/include -L/home/jiel/nvm-middleware/cmake/build -L/home/jiel/HdrHistogram_c/cmake/build/src
+LDFLAGS= -lpthread -ltbb -lhiredis -lmiddleware -lpmemkv -lhdr_histogram -lnuma -lprofiler
 SUBDIRS=core db redis
 SUBSRCS=$(wildcard core/*.cc) $(wildcard db/*.cc)
 OBJECTS=$(SUBSRCS:.cc=.o)

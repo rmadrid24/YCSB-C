@@ -18,7 +18,6 @@ class NvmMiddlewareDB : public DB {
   }
 
   ~NvmMiddlewareDB() {
-      cout << "Called deconstructor\n";
       delete mw_;
   }
 

@@ -1,5 +1,5 @@
-operationcount=1000000
-#operationcount=200
+operationcount=2000000
+#operationcount=10000
 fieldcount=1
 fieldlength=1024
 measurementtype=hdrhistogram

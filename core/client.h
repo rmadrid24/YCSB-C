@@ -13,12 +13,16 @@
 #include "db.h"
 #include "core_workload.h"
 #include "utils.h"
+#include <hdr_histogram.h>
 
 namespace ycsbc {
 
 class Client {
  public:
-  Client(DB &db, CoreWorkload &wl) : db_(db), workload_(wl) { }
+  Client(DB &db, CoreWorkload &wl, hdr_histogram *r_hist, hdr_histogram *m_hist) : db_(db), workload_(wl) {
+	  modify_histogram_ = m_hist;
+	  read_histogram_ = r_hist;
+  }
   
   virtual bool DoInsert();
   virtual bool DoTransaction();
@@ -35,23 +39,34 @@ class Client {
   
   DB &db_;
   CoreWorkload &workload_;
+  hdr_histogram* modify_histogram_;
+  hdr_histogram* read_histogram_;
 };
 
 inline bool Client::DoInsert() {
+  utils::Timer<std::chrono::microseconds> timer;
+  timer.Start();
   std::string key = workload_.NextSequenceKey();
   std::vector<DB::KVPair> pairs;
   workload_.BuildValues(pairs);
-  return (db_.Insert(workload_.NextTable(), key, pairs) == DB::kOK);
+  auto result = (db_.Insert(workload_.NextTable(), key, pairs) == DB::kOK);
+  hdr_record_value_atomic(modify_histogram_, timer.End());
+  return result;
 }
 
 inline bool Client::DoTransaction() {
   int status = -1;
+  utils::Timer<std::chrono::microseconds> timer;
   switch (workload_.NextOperation()) {
     case READ:
+      timer.Start();
       status = TransactionRead();
+      hdr_record_value_atomic(read_histogram_, timer.End());
       break;
     case UPDATE:
+      timer.Start();
       status = TransactionUpdate();
+      hdr_record_value_atomic(modify_histogram_, timer.End());
       break;
     case INSERT:
       status = TransactionInsert();
@@ -74,6 +89,7 @@ inline int Client::TransactionRead() {
   const std::string &key = workload_.NextTransactionKey();
   std::vector<DB::KVPair> result;
   if (!workload_.read_all_fields()) {
+    std::cout << "Read gets here!\n";
     std::vector<std::string> fields;
     fields.push_back("field" + workload_.NextFieldName());
     return db_.Read(table, key, &fields, result);

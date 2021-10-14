@@ -11,6 +11,9 @@
 #include <iostream>
 #include <vector>
 #include <future>
+#include <hdr_histogram.h>
+#include <numa.h>
+#include <unistd.h>
 #include "core/utils.h"
 #include "core/timer.h"
 #include "core/client.h"
@@ -23,23 +26,63 @@ void UsageMessage(const char *command);
 bool StrStartWith(const char *str, const char *pre);
 string ParseCommandLine(int argc, const char *argv[], utils::Properties &props);
 
-int DelegateClient(ycsbc::DB *db, ycsbc::CoreWorkload *wl, const int num_ops,
-    bool is_loading) {
+std::mutex print_mutex;
+
+int DelegateClient(int rank, ycsbc::DB *db, ycsbc::CoreWorkload *wl, const int num_ops,
+    bool is_loading, vector<int> &actual_ops, hdr_histogram* r_histogram, hdr_histogram* m_histogram) {
   db->Init();
-  ycsbc::Client client(*db, *wl);
-  int oks = 0;
-  for (int i = 0; i < num_ops; ++i) {
+  ycsbc::Client client(*db, *wl, r_histogram, m_histogram);
+  //atomic<int> oks{0};
+  //vector<future<int>> fut_vec;
+  int oks;
+  for (int i = 0; i < num_ops; i++) {	
+	/*fut_vec.emplace_back(
+  		std::async(
+			[&]()
+			{
+				if (is_loading) {
+					oks += client.DoInsert();
+				} else {
+					oks += client.DoTransaction();
+				}
+				return 1;
+			}
+		)
+	);*/
+
     if (is_loading) {
       oks += client.DoInsert();
     } else {
       oks += client.DoTransaction();
     }
   }
+  /*for (auto& fut : fut_vec) {
+	fut.wait();
+  }
+  fut_vec.clear();*/
   db->Close();
+  actual_ops[rank] = oks;
   return oks;
 }
 
 int main(const int argc, const char *argv[]) {
+	vector<cpu_set_t> cpus;
+	for (int j = 16; j < 48; j++) {
+		cpu_set_t cpuset;
+		CPU_ZERO(&cpuset);
+		CPU_SET(j, &cpuset);
+		cpus.emplace_back(move(cpuset));
+	}
+	for (int k = 64; k < 96; k++) {
+		cpu_set_t cpuset;
+		CPU_ZERO(&cpuset);
+		CPU_SET(k, &cpuset);		
+		cpus.emplace_back(move(cpuset));
+	}
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(23, &cpuset);
+	sched_setaffinity(getpid(), sizeof(cpuset), &cpuset);
   utils::Properties props;
   string file_name = ParseCommandLine(argc, argv, props);
 
@@ -52,44 +95,87 @@ int main(const int argc, const char *argv[]) {
   ycsbc::CoreWorkload wl;
   wl.Init(props);
 
-  const int num_threads = stoi(props.GetProperty("threadcount", "1"));
+  struct hdr_histogram* r_histogram;
+  struct hdr_histogram* m_histogram;
+  hdr_init(
+    1,  // Minimum value
+    INT64_C(3600000000),  // Maximum value
+    3,  // Number of significant figures
+    &r_histogram
+    );
+  hdr_init(
+    1,  // Minimum value
+    INT64_C(3600000000),  // Maximum value
+    3,  // Number of significant figures
+    &m_histogram
+    );
 
+  //const int num_threads = stoi(props.GetProperty("threadcount", "1"));
+  const int num_threads = 64;
   // Loads data
-  vector<future<int>> actual_ops;
+  vector<int> actual_ops;
+  vector<std::thread> threads;
   int total_ops = stoi(props[ycsbc::CoreWorkload::RECORD_COUNT_PROPERTY]);
-  for (int i = 0; i < num_threads; ++i) {
-    actual_ops.emplace_back(async(launch::async,
-        DelegateClient, db, &wl, total_ops / num_threads, true));
+  struct hdr_histogram* r_histogram_l;
+  struct hdr_histogram* m_histogram_l;
+  hdr_init(
+	1,  // Minimum value
+	INT64_C(3600000000),  // Maximum value
+	3,  // Number of significant figures
+	&r_histogram_l
+	);
+  hdr_init(
+	1,  // Minimum value
+	INT64_C(3600000000),  // Maximum value
+	3,  // Number of significant figures
+	&m_histogram_l
+	);
+  utils::Timer<std::chrono::seconds> load_timer;
+  int sum = 0;
+  load_timer.Start();
+  for (int i = 0; i < num_threads; i++) {
+	actual_ops.emplace_back(0);
+    	threads.emplace_back(std::thread(DelegateClient, i, db, &wl, total_ops / num_threads, true, ref(actual_ops), r_histogram_l, m_histogram_l));
+	pthread_setaffinity_np(threads[i].native_handle(), sizeof(cpus[i]), &cpus[i]);
   }
   assert((int)actual_ops.size() == num_threads);
 
-  int sum = 0;
-  for (auto &n : actual_ops) {
-    assert(n.valid());
-    sum += n.get();
+  for (int i = 0; i < num_threads; i++) {
+	threads[i].join();
+	//cout << "load ops " << i << " : " << actual_ops[i] << endl;
+       	sum += actual_ops[i];
   }
-  cerr << "# Loading records:\t" << sum << endl;
+  double loadDuration = load_timer.End();
+  cerr << "# Loading records:\t" << sum << " in " << loadDuration << " seconds." << endl;
+  cout << "Insert Mean: " << hdr_value_at_percentile(m_histogram_l, 50.0) << endl;
+  cout << "Insert 99%: " << hdr_value_at_percentile(m_histogram_l, 99.0) << endl;
 
   // Peforms transactions
   actual_ops.clear();
+  threads.clear();
   total_ops = stoi(props[ycsbc::CoreWorkload::OPERATION_COUNT_PROPERTY]);
-  utils::Timer<double> timer;
+  utils::Timer<std::chrono::seconds> timer;
   timer.Start();
-  for (int i = 0; i < num_threads; ++i) {
-    actual_ops.emplace_back(async(launch::async,
-        DelegateClient, db, &wl, total_ops / num_threads, false));
+  for (int i = 0; i < num_threads; i++) {
+	actual_ops.emplace_back(0);
+	threads.emplace_back(std::thread(DelegateClient, i, db, &wl, total_ops / num_threads, false, ref(actual_ops), r_histogram, m_histogram));
+	pthread_setaffinity_np(threads[i].native_handle(), sizeof(cpus[i]), &cpus[i]);
   }
   assert((int)actual_ops.size() == num_threads);
 
   sum = 0;
-  for (auto &n : actual_ops) {
-    assert(n.valid());
-    sum += n.get();
+  for (int i = 0; i < threads.size(); i++) {
+	threads[i].join();
+    	sum += actual_ops[i];
   }
   double duration = timer.End();
   cerr << "# Transaction throughput (KTPS)" << endl;
   cerr << props["dbname"] << '\t' << file_name << '\t' << num_threads << '\t' << total_ops << '\t' << duration << '\t';
   cerr << total_ops / duration / 1000 << endl;
+  cout << "Read Mean: " << hdr_value_at_percentile(r_histogram, 50.0) << endl;
+  cout << "Read 99%: " << hdr_value_at_percentile(r_histogram, 99.0) << endl;
+  cout << "Write Mean: " << hdr_value_at_percentile(m_histogram, 50.0) << endl;
+  cout << "Write 99%: " << hdr_value_at_percentile(m_histogram, 99.0) << endl;
   delete db;
 }
 
