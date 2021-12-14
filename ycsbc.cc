@@ -32,57 +32,20 @@ int DelegateClient(int rank, ycsbc::DB *db, ycsbc::CoreWorkload *wl, const int n
     bool is_loading, vector<int> &actual_ops, hdr_histogram* r_histogram, hdr_histogram* m_histogram) {
   db->Init();
   ycsbc::Client client(*db, *wl, r_histogram, m_histogram);
-  //atomic<int> oks{0};
-  //vector<future<int>> fut_vec;
   int oks;
   for (int i = 0; i < num_ops; i++) {	
-	/*fut_vec.emplace_back(
-  		std::async(
-			[&]()
-			{
-				if (is_loading) {
-					oks += client.DoInsert();
-				} else {
-					oks += client.DoTransaction();
-				}
-				return 1;
-			}
-		)
-	);*/
-
     if (is_loading) {
       oks += client.DoInsert();
     } else {
       oks += client.DoTransaction();
     }
   }
-  /*for (auto& fut : fut_vec) {
-	fut.wait();
-  }
-  fut_vec.clear();*/
   db->Close();
   actual_ops[rank] = oks;
   return oks;
 }
 
 int main(const int argc, const char *argv[]) {
-	vector<cpu_set_t> cpus;
-	for (int j = 16; j < 48; j++) {
-		cpu_set_t cpuset;
-		CPU_ZERO(&cpuset);
-		CPU_SET(j, &cpuset);
-		cpus.emplace_back(move(cpuset));
-	}
-	for (int k = 64; k < 96; k++) {
-		cpu_set_t cpuset;
-		CPU_ZERO(&cpuset);
-		CPU_SET(k, &cpuset);		
-		cpus.emplace_back(move(cpuset));
-	}
-	cpu_set_t cpuset;
-	CPU_ZERO(&cpuset);
-	CPU_SET(23, &cpuset);
-	sched_setaffinity(getpid(), sizeof(cpuset), &cpuset);
   utils::Properties props;
   string file_name = ParseCommandLine(argc, argv, props);
 
@@ -111,7 +74,7 @@ int main(const int argc, const char *argv[]) {
     );
 
   //const int num_threads = stoi(props.GetProperty("threadcount", "1"));
-  const int num_threads = 64;
+  const int num_threads = 100;
   // Loads data
   vector<int> actual_ops;
   vector<std::thread> threads;
@@ -136,13 +99,11 @@ int main(const int argc, const char *argv[]) {
   for (int i = 0; i < num_threads; i++) {
 	actual_ops.emplace_back(0);
     	threads.emplace_back(std::thread(DelegateClient, i, db, &wl, total_ops / num_threads, true, ref(actual_ops), r_histogram_l, m_histogram_l));
-	pthread_setaffinity_np(threads[i].native_handle(), sizeof(cpus[i]), &cpus[i]);
   }
   assert((int)actual_ops.size() == num_threads);
 
   for (int i = 0; i < num_threads; i++) {
 	threads[i].join();
-	//cout << "load ops " << i << " : " << actual_ops[i] << endl;
        	sum += actual_ops[i];
   }
   double loadDuration = load_timer.End();
@@ -159,7 +120,6 @@ int main(const int argc, const char *argv[]) {
   for (int i = 0; i < num_threads; i++) {
 	actual_ops.emplace_back(0);
 	threads.emplace_back(std::thread(DelegateClient, i, db, &wl, total_ops / num_threads, false, ref(actual_ops), r_histogram, m_histogram));
-	pthread_setaffinity_np(threads[i].native_handle(), sizeof(cpus[i]), &cpus[i]);
   }
   assert((int)actual_ops.size() == num_threads);
 
@@ -172,10 +132,18 @@ int main(const int argc, const char *argv[]) {
   cerr << "# Transaction throughput (KTPS)" << endl;
   cerr << props["dbname"] << '\t' << file_name << '\t' << num_threads << '\t' << total_ops << '\t' << duration << '\t';
   cerr << total_ops / duration / 1000 << endl;
-  cout << "Read Mean: " << hdr_value_at_percentile(r_histogram, 50.0) << endl;
-  cout << "Read 99%: " << hdr_value_at_percentile(r_histogram, 99.0) << endl;
-  cout << "Write Mean: " << hdr_value_at_percentile(m_histogram, 50.0) << endl;
-  cout << "Write 99%: " << hdr_value_at_percentile(m_histogram, 99.0) << endl;
+  cout << "Read CDF\n";
+  cout << "0.05 " << hdr_value_at_percentile(r_histogram, 5.0) << endl;
+  cout << "0.25 " << hdr_value_at_percentile(r_histogram, 25.0) << endl;
+  cout << "0.50 " << hdr_value_at_percentile(r_histogram, 50.0) << endl;
+  cout << "0.75 " << hdr_value_at_percentile(r_histogram, 75.0) << endl;
+  cout << "0.99 " << hdr_value_at_percentile(r_histogram, 99.0) << endl;
+  cout << "Write CDF\n";
+  cout << "0.05 " << hdr_value_at_percentile(m_histogram, 5.0) << endl;
+  cout << "0.25 " << hdr_value_at_percentile(m_histogram, 25.0) << endl;
+  cout << "0.50 " << hdr_value_at_percentile(m_histogram, 50.0) << endl;
+  cout << "0.75 " << hdr_value_at_percentile(m_histogram, 75.0) << endl;
+  cout << "0.99 " << hdr_value_at_percentile(m_histogram, 99.0) << endl;
   delete db;
 }
 
